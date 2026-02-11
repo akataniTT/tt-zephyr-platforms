@@ -177,8 +177,8 @@ void gddr_pwr_experiment(void)
 {
 	/* Experiment 1: Set GDDRIO */
 	/* TODO: 15.8 for UBB and 15 for p150 */
-	// set_mpq8655(GDDRIO_EAST_ADDR, 1390, 15, 12);
-	// set_mpq8655(GDDRIO_WEST_ADDR, 1390, 15, 12);
+	/* set_mpq8655(GDDRIO_EAST_ADDR, 1390, 15, 12); */
+	/* set_mpq8655(GDDRIO_WEST_ADDR, 1390, 15, 12); */
 
 	/* Experiment 2: Set VDDA, VDDR */
 	set_mpm3695(GDDR_VDDR_ADDR, 870, GDDR_VDDR_FB1, GDDR_VDDR_FB2);
