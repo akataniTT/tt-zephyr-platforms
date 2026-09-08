@@ -241,6 +241,16 @@ partitions {
 		binary-path = "$BUILD_DIR/mcuboot_magic_test.bin";
 	};
 
+	/*
+	 * Per-controller GDDR CA calibration data, latched by the SMC after
+	 * MRISC training. No binary-path: the partition starts erased and is
+	 * written in the field (or provisioned from characterization data).
+	 */
+	gddrcal: partition@31e000 {
+		label = "gddrcal";
+		reg = <0x31e000 DT_SIZE_K(4)>;
+	};
+
 	/* Leave some space for future fixed partitions, if needed. */
 
 	/* Free space for storage */
