@@ -22,8 +22,12 @@
 #define GDDR_FEATURE_CTRL_PHY_PARAMS_OVERRIDE BIT(1)
 #define GDDR_FEATURE_ENABLE_INLINE_ECC        BIT(2)
 #define GDDR_FEATURE_CA_SETTINGS_VALID        BIT(3)
+/* MRISC 2.17: VREFC margin check / 1D sweep. 2.18+: five-point check / 2D eye centering. */
 #define GDDR_FEATURE_ENABLE_CA_MARGIN_CHECK   BIT(4)
 #define GDDR_FEATURE_ENABLE_CA_SWEEP_FALLBACK BIT(5)
+/* MRISC 2.18+ (params table v9) */
+#define GDDR_FEATURE_CA_PHASE_OFFSETS_VALID   BIT(6)
+#define GDDR_FEATURE_CA_CENTER_PER_CH_VREFC   BIT(7)
 
 #define MIN_GDDR_SPEED             12000
 #define MAX_GDDR_SPEED             20000
@@ -52,7 +56,9 @@
  * satisfies the +/-N margin requirement. Measured worst case is ~28 s on a
  * P300 (failing points are dominated by training retries); allow for it.
  * Healthy boots still finish in well under a second - this only delays the
- * failure verdict for controllers that are already in trouble.
+ * failure verdict for controllers that are already in trouble. MRISC 2.18+
+ * replaces the sweep with 2D eye centering capped at ca_center_time_cap_ms
+ * (2 s by default) per controller.
  */
 #define MRISC_INIT_TIMEOUT 40000 /* In ms */
 #else

@@ -16,7 +16,7 @@
  */
 #include <stdint.h>
 
-#define GDDR_PARAMS_TABLE_T_VERSION (0x00000008)
+#define GDDR_PARAMS_TABLE_T_VERSION (0x00000009)
 
 typedef struct {
 	uint32_t params_table_version;
@@ -37,25 +37,72 @@ typedef struct {
 	/* ID to uniquely identify each controller (0-7) */
 	uint32_t ca_vrefc_offset;
 	/*
-	 * Per-controller CA VREFC offset as 4-bit two's-complement MR10 OP[3:0] code.
-	 * Used only when feature_bits.ca_settings_valid is 1. Patched at load time by the SMC.
+	 * Per-controller CA VREFC offset as 4-bit two's-complement MR10 OP[3:0] code. Used
+	 * only when feature_bits.ca_settings_valid is 1. Patched at load time by the SMC.
 	 */
 	uint32_t ca_termination_offset;
 	/*
-	 * Per-controller CA termination offset (MR3, 0-3).
-	 * Used only when feature_bits.ca_settings_valid is 1. Patched at load time by the SMC.
+	 * Per-controller CA termination offset (MR3, 0-3). Used only when
+	 * feature_bits.ca_settings_valid is 1. Patched at load time by the SMC.
 	 */
 	uint32_t ca_margin_check_vref_steps;
 	/*
-	 * Number of VREFC offset steps (N) to probe at +/-N around nominal during the
-	 * post-training CA margin check. Valid range 1-7.
+	 * Number of VREFC offset steps (N) to probe at +/-N around nominal during the post-
+	 * training CA margin check. Valid range 1-7.
 	 */
 	uint32_t ca_ocd_pulldown_offset;
 	/*
-	 * Per-controller CA driver strength as 3-bit OCD pulldown offset code
-	 * (0-3 = 0..+3, 4-7 = -4..-1). Used only when feature_bits.ca_settings_valid is 1
-	 * and the value is <= 7; 0xFF (default) = not seeded, keep the FW board-type default.
-	 * Patched at load time by the SMC.
+	 * Per-controller CA driver strength as 3-bit OCD pulldown offset code (0-3 = 0..+3,
+	 * 4-7 = -4..-1). Used only when feature_bits.ca_settings_valid is 1 and the value is
+	 * <= 7; 0xFF (default) = not seeded, keep the FW board-type default. Patched at load
+	 * time by the SMC.
+	 */
+	uint32_t ca_vrefc_offset_ch1;
+	/*
+	 * Channel B CA VREFC offset (4-bit MR10 code). Used only when
+	 * feature_bits.ca_settings_valid and ca_center_per_ch_vrefc are 1 and the value is
+	 * <= 0xF; 0xFF = same as ca_vrefc_offset. Patched at load time by the SMC.
+	 */
+	uint32_t ca_phase_offset_ch0;
+	/*
+	 * Channel A CA phase offset added to the CA training result, signed byte in units of
+	 * 2 mixer steps. Used only when feature_bits.ca_phase_offsets_valid is 1. Patched at
+	 * load time by the SMC.
+	 */
+	uint32_t ca_phase_offset_ch1;
+	/* Channel B CA phase offset, same encoding as ca_phase_offset_ch0. */
+	uint32_t ca_center_policy;
+	/*
+	 * When to run the 2D eye scan. 0 = only when the five-point check fails, 1 = every
+	 * boot (quick scan about 0.4 s per controller).
+	 */
+	uint32_t ca_center_scan_mode;
+	/* 2D eye scan mode. 0 = quick (VREFC rows every 3 codes), 1 = full (every VREFC row). */
+	uint32_t ca_center_check_phase_steps;
+	/*
+	 * Five-point check phase probe distance M in mixer steps (the memtest passes about
+	 * 10-15 steps further out than DRAM traffic). 0 = default 40.
+	 */
+	uint32_t ca_center_hyst_phase;
+	/*
+	 * Only move a channel's phase if the 2D eye centroid is at least this many mixer
+	 * steps away.
+	 */
+	uint32_t ca_center_hyst_vrefc;
+	/*
+	 * Only move VREFC if the chosen value is at least this many codes away (1-code moves
+	 * are within the scan's repeatability).
+	 */
+	uint32_t ca_center_min_area;
+	/*
+	 * Smallest acceptable always-pass eye area (mixer steps x VREFC codes, smallest
+	 * channel; healthy eyes are about 1100-1600). Below it CA termination / driver
+	 * strength candidates are tried. 0 = never.
+	 */
+	uint32_t ca_center_time_cap_ms;
+	/*
+	 * Wall-clock cap for the CA centering per boot; once spent, no further fallback
+	 * candidates or scans are started.
 	 */
 } gddr_params_table_t;
 

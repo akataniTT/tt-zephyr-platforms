@@ -17,6 +17,7 @@
 #include "status_reg.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <tenstorrent/bh_power.h>
@@ -86,8 +87,8 @@ static gddr_cal_table_t gddr_cal_table;
 static gddr_cal_entry_t *gddr_asic_cal;
 
 /* Row of the gddrcal table belonging to this ASIC: 0 on single-ASIC boards, 0/1 on P300,
- * SPI-provisioned UBB-local ASIC location on Galaxy. Allows one provisioned table image to
- * be broadcast to every ASIC's flash.
+ * SPI-provisioned UBB-local ASIC location minus one on Galaxy (locations there are 1-8).
+ * Allows one provisioned table image to be broadcast to every ASIC's flash.
  *
  * @return the row index, or -EINVAL if the ASIC location does not fit the table. Aliasing
  * an out-of-range location onto another ASIC's row would silently apply the wrong CA
@@ -96,15 +97,17 @@ static gddr_cal_entry_t *gddr_asic_cal;
 static int GddrCalAsicIndex(void)
 {
 	uint32_t asic_location = tt_bh_fwtable_get_asic_location(fwtable_dev);
+	bool ubb = tt_bh_fwtable_get_pcb_type(fwtable_dev) == PcbTypeUBB;
 
-	if (asic_location >= GDDR_CAL_NUM_ASICS) {
+	if ((ubb && !IN_RANGE(asic_location, 1, GDDR_CAL_NUM_ASICS)) ||
+	    (!ubb && asic_location >= GDDR_CAL_NUM_ASICS)) {
 		LOG_WRN_ONCE("asic_location %u outside gddrcal table (%u rows); CA seed/latch "
 			     "disabled",
 			     asic_location, GDDR_CAL_NUM_ASICS);
 		return -EINVAL;
 	}
 
-	return asic_location;
+	return ubb ? asic_location - 1 : asic_location;
 }
 
 struct gddr_bist_info get_gddr_bist_info(void)
@@ -206,6 +209,14 @@ int read_gddr_telemetry_table(uint8_t gddr_inst, gddr_telemetry_table_t *gddr_te
 		const size_t v3_start = offsetof(gddr_telemetry_table_t, ca_vrefc_offset);
 
 		memset((uint8_t *)gddr_telemetry + v3_start, 0, sizeof(*gddr_telemetry) - v3_start);
+	} else if (gddr_telemetry->telemetry_table_version < 4) {
+		/* v3 ends with three reserved bytes where v4 puts the phase offsets and
+		 * channel B VREFC; a v3 MRISC uses one VREFC for both channels.
+		 */
+		const size_t v4_start = offsetof(gddr_telemetry_table_t, ca_phase_offset_ch0);
+
+		memset((uint8_t *)gddr_telemetry + v4_start, 0, sizeof(*gddr_telemetry) - v4_start);
+		gddr_telemetry->ca_vrefc_offset_ch1 = gddr_telemetry->ca_vrefc_offset;
 	}
 
 	return 0;
@@ -256,6 +267,26 @@ static int LoadMriscFw(uint8_t gddr_inst, uint8_t *buf, size_t buf_size, size_t 
 
 	return rc;
 }
+/*
+ * Params table v9 (MRISC 2.18+): per-channel CA phase offsets and channel B VREFC from the
+ * gddrcal entry. Both phases must be set for the offsets to be seeded; channel B's VREFC is only
+ * seeded when per-channel VREFC is enabled, otherwise MRISC uses ca_vrefc_offset for both.
+ */
+static void SeedGddrCaCenter(volatile gddr_params_table_t *params_table,
+			     const gddr_cal_entry_t *entry, uint32_t *feature_bits)
+{
+	if (entry->ca_phase_offset[0] != GDDR_CA_PHASE_OFFSET_UNSET &&
+	    entry->ca_phase_offset[1] != GDDR_CA_PHASE_OFFSET_UNSET) {
+		params_table->ca_phase_offset_ch0 = (uint8_t)entry->ca_phase_offset[0];
+		params_table->ca_phase_offset_ch1 = (uint8_t)entry->ca_phase_offset[1];
+		*feature_bits |= GDDR_FEATURE_CA_PHASE_OFFSETS_VALID;
+	}
+	if (IS_ENABLED(CONFIG_TT_BH_ARC_GDDR_CA_PER_CH_VREFC) &&
+	    entry->ca_vrefc_offset_ch1 <= GDDR_CA_VREFC_OFFSET_MAX) {
+		params_table->ca_vrefc_offset_ch1 = entry->ca_vrefc_offset_ch1;
+	}
+}
+
 static int LoadMriscFwCfg(uint8_t gddr_inst, uint8_t *buf, size_t buf_size, size_t spi_address,
 			  size_t image_size)
 {
@@ -282,6 +313,10 @@ static int LoadMriscFwCfg(uint8_t gddr_inst, uint8_t *buf, size_t buf_size, size
 
 			feature_bits |= GDDR_FEATURE_ENABLE_CA_MARGIN_CHECK |
 					GDDR_FEATURE_ENABLE_CA_SWEEP_FALLBACK;
+			if (IS_ENABLED(CONFIG_TT_BH_ARC_GDDR_CA_PER_CH_VREFC) &&
+			    params_table->params_table_version >= 9) {
+				feature_bits |= GDDR_FEATURE_CA_CENTER_PER_CH_VREFC;
+			}
 			if (entry != NULL && entry->valid) {
 				params_table->ca_vrefc_offset = entry->ca_vrefc_offset;
 				params_table->ca_termination_offset = entry->ca_termination_offset;
@@ -289,6 +324,9 @@ static int LoadMriscFwCfg(uint8_t gddr_inst, uint8_t *buf, size_t buf_size, size
 					/* 0xFF = "not seeded", MRISC keeps its board default */
 					params_table->ca_ocd_pulldown_offset =
 						entry->ca_ocd_pulldown_offset;
+				}
+				if (params_table->params_table_version >= 9) {
+					SeedGddrCaCenter(params_table, entry, &feature_bits);
 				}
 				feature_bits |= GDDR_FEATURE_CA_SETTINGS_VALID;
 			}
@@ -699,12 +737,26 @@ static int CheckGddrHwTest(void)
 }
 
 #ifdef CONFIG_TT_BH_ARC_GDDR_CA_LATCH
+/* True if the saved phase offset is close enough to the applied one to keep (see
+ * CONFIG_TT_BH_ARC_GDDR_CA_PHASE_LATCH_DEADBAND). An unset offset only matches unset.
+ */
+static bool CaPhaseOffsetSaved(int8_t saved, int8_t applied)
+{
+	if (saved == GDDR_CA_PHASE_OFFSET_UNSET || applied == GDDR_CA_PHASE_OFFSET_UNSET) {
+		return saved == applied;
+	}
+	return abs(saved - applied) <= CONFIG_TT_BH_ARC_GDDR_CA_PHASE_LATCH_DEADBAND;
+}
+
 /**
  * @brief Pull the applied CA settings out of MRISC telemetry into the cal table cache.
  *
  * Reads the CA result fields the MRISC FW published after training. If MRISC reports that
- * the applied settings differ from the seeded/default ones (i.e. the runtime CA sweep
- * picked a new best setting), the cached gddrcal entry is updated.
+ * the applied settings differ from the seeded/default ones (i.e. the runtime CA sweep, or
+ * from MRISC 2.18 the 2D eye centering, picked a new setting), the cached gddrcal entry is
+ * updated, unless only the phase offsets moved and by no more than the latch deadband.
+ * Telemetry v4 adds the per-channel phase offsets and channel B VREFC; with an older MRISC
+ * they are stored as unset.
  *
  * @return true if the cached table changed and needs to be written back to flash.
  */
@@ -739,11 +791,20 @@ static bool LatchGddrCaSettings(uint8_t gddr_inst)
 
 	/* Applied CA driver strength. MRISC reports 0xFF when it did not pick a value;
 	 * seeding that back through the params table makes MRISC keep its default.
+	 * From v4 the same word also holds ca_phase_offset_ch0/ch1 and ca_vrefc_offset_ch1.
 	 */
 	uint32_t ca_word2 = MriscL1Read32(
 		gddr_inst, GDDR_TELEMETRY_TABLE_ADDR +
 				   offsetof(gddr_telemetry_table_t, ca_ocd_pulldown_offset));
 	uint8_t ocd_pulldown_offset = FIELD_GET(GENMASK(7, 0), ca_word2);
+	int8_t phase_offset[2] = {GDDR_CA_PHASE_OFFSET_UNSET, GDDR_CA_PHASE_OFFSET_UNSET};
+	uint8_t vrefc_offset_ch1 = GDDR_CA_VREFC_OFFSET_CH1_SAME;
+
+	if (version >= 4) {
+		phase_offset[0] = (int8_t)FIELD_GET(GENMASK(15, 8), ca_word2);
+		phase_offset[1] = (int8_t)FIELD_GET(GENMASK(23, 16), ca_word2);
+		vrefc_offset_ch1 = FIELD_GET(GENMASK(31, 24), ca_word2);
+	}
 
 	/* Anything persisted here is seeded back into MRISC on every later boot, so refuse
 	 * values the encodings cannot represent rather than making a bad read permanent.
@@ -751,18 +812,32 @@ static bool LatchGddrCaSettings(uint8_t gddr_inst)
 	if (vrefc_offset > GDDR_CA_VREFC_OFFSET_MAX ||
 	    termination_offset > GDDR_CA_TERMINATION_OFFSET_MAX ||
 	    (ocd_pulldown_offset > GDDR_CA_OCD_PULLDOWN_OFFSET_MAX &&
-	     ocd_pulldown_offset != GDDR_CA_OCD_PULLDOWN_UNSET)) {
-		LOG_WRN("GDDR %d reported out-of-range CA settings: vrefc_offset=0x%x "
-			"termination_offset=%d ocd_pulldown_offset=0x%x; not latching",
-			gddr_inst, vrefc_offset, termination_offset, ocd_pulldown_offset);
+	     ocd_pulldown_offset != GDDR_CA_OCD_PULLDOWN_UNSET) ||
+	    (version >= 4 && (phase_offset[0] == GDDR_CA_PHASE_OFFSET_UNSET ||
+			      phase_offset[1] == GDDR_CA_PHASE_OFFSET_UNSET ||
+			      vrefc_offset_ch1 > GDDR_CA_VREFC_OFFSET_MAX))) {
+		LOG_WRN("GDDR %d reported out-of-range CA settings: vrefc_offset=0x%x/0x%x "
+			"termination_offset=%d ocd_pulldown_offset=0x%x phase_offset=%d/%d; "
+			"not latching",
+			gddr_inst, vrefc_offset, vrefc_offset_ch1, termination_offset,
+			ocd_pulldown_offset, phase_offset[0], phase_offset[1]);
 		return false;
+	}
+
+	/* MRISC reports channel B's VREFC even when it follows channel A. */
+	if (!IS_ENABLED(CONFIG_TT_BH_ARC_GDDR_CA_PER_CH_VREFC) ||
+	    vrefc_offset_ch1 == vrefc_offset) {
+		vrefc_offset_ch1 = GDDR_CA_VREFC_OFFSET_CH1_SAME;
 	}
 
 	gddr_cal_entry_t *entry = &gddr_asic_cal[gddr_inst];
 
 	if (entry->valid && entry->ca_vrefc_offset == vrefc_offset &&
 	    entry->ca_termination_offset == termination_offset &&
-	    entry->ca_ocd_pulldown_offset == ocd_pulldown_offset) {
+	    entry->ca_ocd_pulldown_offset == ocd_pulldown_offset &&
+	    CaPhaseOffsetSaved(entry->ca_phase_offset[0], phase_offset[0]) &&
+	    CaPhaseOffsetSaved(entry->ca_phase_offset[1], phase_offset[1]) &&
+	    entry->ca_vrefc_offset_ch1 == vrefc_offset_ch1) {
 		return false;
 	}
 
@@ -771,10 +846,13 @@ static bool LatchGddrCaSettings(uint8_t gddr_inst)
 		.ca_termination_offset = termination_offset,
 		.ca_ocd_pulldown_offset = ocd_pulldown_offset,
 		.valid = 1,
+		.ca_phase_offset = {phase_offset[0], phase_offset[1]},
+		.ca_vrefc_offset_ch1 = vrefc_offset_ch1,
 	};
-	LOG_INF("GDDR %d CA settings changed: vrefc_offset=0x%x termination_offset=%d "
-		"ocd_pulldown_offset=0x%x",
-		gddr_inst, vrefc_offset, termination_offset, ocd_pulldown_offset);
+	LOG_INF("GDDR %d CA settings changed: vrefc_offset=0x%x/0x%x termination_offset=%d "
+		"ocd_pulldown_offset=0x%x phase_offset=%d/%d",
+		gddr_inst, vrefc_offset, vrefc_offset_ch1, termination_offset, ocd_pulldown_offset,
+		phase_offset[0], phase_offset[1]);
 	return true;
 }
 

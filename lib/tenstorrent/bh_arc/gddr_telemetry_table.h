@@ -16,7 +16,7 @@
  */
 #include <stdint.h>
 
-#define GDDR_TELEMETRY_TABLE_T_VERSION (0x00000003)
+#define GDDR_TELEMETRY_TABLE_T_VERSION (0x00000004)
 
 typedef struct {
 	uint32_t telemetry_table_version;
@@ -51,20 +51,24 @@ typedef struct {
 	/* Applied CA termination offset (MR3, 0-3). */
 	uint8_t ca_settings_source;
 	/*
-	 * Where the applied CA settings came from. 0 = FW default LUT,
-	 * 1 = params table (SMC-seeded), 2 = runtime CA sweep.
+	 * Where the applied CA settings came from. 0 = FW default LUT, 1 = params table
+	 * (SMC-seeded), 2 = runtime 1D CA sweep (MRISC 2.17), 3 = 2D eye centering
+	 * (MRISC 2.18+).
 	 */
 	uint8_t ca_settings_changed;
 	/*
-	 * 1 = Applied CA settings differ from the seeded/default values
-	 * (SMC should latch them to flash).
+	 * 1 = Applied CA settings differ from the seeded/default values (SMC should latch
+	 * them to flash).
 	 */
 	uint8_t ca_margin_check_status;
-	/* Post-training CA margin check result. 0 = not run, 1 = pass, 2 = fail. */
+	/*
+	 * Post-training CA check result (2.18+ five-point check, see
+	 * ca_center_check_fail_mask). 0 = not run, 1 = pass, 2 = fail.
+	 */
 	uint8_t ca_sweep_status;
 	/*
-	 * Runtime CA sweep result. 0 = not run, 1 = completed with passing window,
-	 * 2 = completed with no passing window.
+	 * Runtime CA tuning result (2.18+ 2D eye centering, 2.17 1D VREFC sweep). 0 =
+	 * not run, 1 = completed with passing window, 2 = completed with no passing window.
 	 */
 	int8_t ca_window_min_offset;
 	/*
@@ -78,14 +82,56 @@ typedef struct {
 	 */
 	uint8_t ca_ocd_pulldown_offset;
 	/*
-	 * Applied CA driver strength as 3-bit OCD pulldown offset code
-	 * (0-3 = 0..+3, 4-7 = -4..-1).
+	 * Applied CA driver strength as 3-bit OCD pulldown offset code (0-3 = 0..+3, 4-7 =
+	 * -4..-1).
 	 */
-	uint8_t ca_reserved0;
+	int8_t ca_phase_offset_ch0;
+	/* Applied channel A CA phase offset on top of CA training, units of 2 mixer steps. */
+	int8_t ca_phase_offset_ch1;
+	/* Applied channel B CA phase offset, units of 2 mixer steps. */
+	uint8_t ca_vrefc_offset_ch1;
+	/*
+	 * Applied channel B CA VREFC offset (MR10 OP[3:0] code). Equals ca_vrefc_offset
+	 * unless per-channel VREFC is enabled.
+	 */
+	uint8_t ca_center_check_fail_mask;
+	/*
+	 * Five-point check points that failed. Bit 0/1 = ch A phase -/+M, bit 2/3 = ch B
+	 * phase -/+M, bit 4/5 = VREFC -/+N, bit 6 = center.
+	 */
+	uint8_t ca_center_scan_status;
+	/* Last 2D eye scan status (ca_eye_status_e + 1), 0 = no scan ran. */
+	uint8_t ca_center_fallback_status;
+	/*
+	 * CA termination / driver strength fallback. 0 = not run, 1 = kept the seeded pair,
+	 * 2 = picked another pair, 3 = time cap hit.
+	 */
+	uint8_t ca_center_reserved0;
 	/* Reserved, reads 0. */
-	uint8_t ca_reserved1;
-	/* Reserved, reads 0. */
-	uint8_t ca_reserved2;
+	uint16_t ca_center_elapsed_ms;
+	/* Time spent in CA centering this boot (ms, saturates). */
+	uint16_t ca_center_area_ch0;
+	/*
+	 * Channel A always-pass eye area of the last scan (mixer steps x VREFC codes; a
+	 * quick-scan row counts for 3 codes).
+	 */
+	uint16_t ca_center_area_ch1;
+	/* Channel B always-pass eye area of the last scan. */
+	int16_t ca_center_centroid_x16_ch0;
+	/*
+	 * Channel A eye centroid phase of the last scan x16, mixer steps vs the codes the
+	 * scan started at.
+	 */
+	int16_t ca_center_centroid_x16_ch1;
+	/* Channel B eye centroid phase of the last scan x16. */
+	int16_t ca_center_centroid_v16_ch0;
+	/*
+	 * Channel A eye centroid VREFC of the last scan x16, codes vs the VREFC the scan
+	 * started at.
+	 */
+	int16_t ca_center_centroid_v16_ch1;
+	/* Channel B eye centroid VREFC of the last scan x16. */
+	uint16_t ca_center_reserved1;
 	/* Reserved, reads 0. */
 } gddr_telemetry_table_t;
 
